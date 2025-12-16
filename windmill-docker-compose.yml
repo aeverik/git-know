@@ -1,0 +1,110 @@
+version: "3.7"
+
+services:
+  windmill_server:
+    image: ghcr.io/windmill-labs/windmill:main
+    pull_policy: always
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+    expose:
+      - 8000
+    ports:
+      - "80:8000"
+    environment:
+      - DATABASE_URL=postgres://postgres:windmill@windmill_db/windmill?sslmode=disable
+      - MODE=server
+      - RUST_LOG=info
+      # Increase timeout for long-running workflows
+      - TIMEOUT=600
+      # Base URL for webhooks (update for production)
+      - BASE_URL=http://localhost
+    depends_on:
+      windmill_db:
+        condition: service_healthy
+
+  windmill_worker:
+    image: ghcr.io/windmill-labs/windmill:main
+    pull_policy: always
+    deploy:
+      replicas: 2  # Scale based on workload
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2048M
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgres://postgres:windmill@windmill_db/windmill?sslmode=disable
+      - MODE=worker
+      - WORKER_GROUP=default
+      - RUST_LOG=info
+      # Keep jobs running for git operations
+      - KEEP_JOB_DIR=true
+      # Increase timeout for Claude API calls
+      - TIMEOUT=600
+    depends_on:
+      windmill_db:
+        condition: service_healthy
+    volumes:
+      # For worker isolation
+      - worker_dependency_cache:/tmp/windmill/cache
+
+  windmill_db:
+    image: postgres:14
+    restart: unless-stopped
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: windmill
+      POSTGRES_DB: windmill
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Add LSP for better IDE support in Windmill UI
+  windmill_lsp:
+    image: ghcr.io/windmill-labs/windmill-lsp:latest
+    pull_policy: always
+    restart: unless-stopped
+    expose:
+      - 3001
+    volumes:
+      - lsp_cache:/root/.cache
+
+volumes:
+  db_data: null
+  worker_dependency_cache: null
+  lsp_cache: null
+
+# Production additions:
+# 
+# 1. Add nginx reverse proxy for HTTPS:
+#
+#   nginx:
+#     image: nginx:alpine
+#     ports:
+#       - "443:443"
+#       - "80:80"
+#     volumes:
+#       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+#       - ./certs:/etc/nginx/certs:ro
+#     depends_on:
+#       - windmill_server
+#
+# 2. Add monitoring:
+#
+#   prometheus:
+#     image: prom/prometheus
+#     volumes:
+#       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+#     ports:
+#       - "9090:9090"
+#
+#   grafana:
+#     image: grafana/grafana
+#     ports:
+#       - "3000:3000"
+#     environment:
+#       - GF_SECURITY_ADMIN_PASSWORD=admin
